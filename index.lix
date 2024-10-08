@@ -8,10 +8,7 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    (if false
-        <li />
-        <il />
-    )
+    ((fn (a b) a b) list fn)
     <script src="index.js"></script>
   </body>
 </html>

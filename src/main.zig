@@ -21,7 +21,7 @@ pub fn main() !void {
             .allocator = allocator,
             .lexer = lexer,
         };
-        var context = Context.init(std.heap.page_allocator);
+        var context = std.StringHashMap(Value).init(std.heap.page_allocator);
         for (builtins.list) |builtin| {
             try context.put(builtin.name, Value{ .builtin = builtin });
         }
@@ -29,7 +29,14 @@ pub fn main() !void {
         try context.put("false", Value{ .list = null });
         var runtime = Runtime{
             .allocator = std.heap.page_allocator,
-            .context = context,
+            .context = Context{
+                .stack = b: {
+                    var l = std.ArrayList(std.StringHashMap(Value)).init(allocator);
+                    try l.append(context);
+                    break :b l;
+                },
+                .allocator = allocator,
+            },
         };
         var list = try parser.parse_list();
         const stdout = std.io.getStdOut().writer();
@@ -46,6 +53,8 @@ pub fn main() !void {
         }
     }
 }
+
+const oom_error = Value{ .string = String{ .data = "out of memory" } };
 
 const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -81,14 +90,16 @@ const Runtime = struct {
                 switch (f) {
                     .ok => |v| switch (v) {
                         .builtin => |builtin| return builtin.func(self, head.rest),
-                        else => return Result{ .err = Value{ .string = String{ .data = "not callable" } } },
+                        .lambda => |lambda| return self.eval_lambda_call(lambda, if (head.rest) |arg| (if (arg.rest != null) Value{ .list = arg } else arg.value) else Value{ .list = null }),
+                        else => {
+                            return Result{ .err = Value{ .string = String{ .data = "not callable" } } };
+                        },
                     },
                     .err => |err| return Result{ .err = err },
                 }
             } else {
                 return Result{ .ok = Value{ .list = null } };
             },
-            .builtin => return Result{ .ok = value },
             .string => |string| if (string.quoted) {
                 return Result{ .ok = Value{ .string = string } };
             } else if (self.context.get(string.data)) |found| {
@@ -96,7 +107,56 @@ const Runtime = struct {
             } else {
                 return Result{ .err = Value{ .string = String{ .data = "symbol not found" } } };
             },
+            else => return Result{ .ok = value },
         }
+    }
+
+    fn eval_lambda_call(self: *Runtime, lambda: Lambda, arg: Value) Result {
+        self.context.push() catch return Result{ .err = oom_error };
+        switch (self.bind_eval_arg(lambda.param.*, arg)) {
+            .ok => {},
+            .err => |err| return Result{ .err = err },
+        }
+        const result = self.eval(lambda.body.*);
+        self.context.pop();
+        return result;
+    }
+
+    fn bind_eval_arg(self: *Runtime, param: Value, arg: Value) ResultOfVoid {
+        switch (param) {
+            .string => |string| if (!string.quoted) {
+                const evaled = switch (self.eval(arg)) {
+                    .ok => |value| value,
+                    .err => |err| return ResultOfVoid{ .err = err },
+                };
+                self.context.put(string.data, evaled) catch return ResultOfVoid{ .err = oom_error };
+            },
+            .list => |plist| switch (arg) {
+                .list => |alist| {
+                    var phead = plist;
+                    var ahead = alist;
+                    while (true) {
+                        if (phead) |pcur| {
+                            if (ahead) |acur| {
+                                switch (self.bind_eval_arg(pcur.value, acur.value)) {
+                                    .ok => {},
+                                    .err => |err| return ResultOfVoid{ .err = err },
+                                }
+                                phead = pcur.rest;
+                                ahead = acur.rest;
+                            } else break;
+                        } else break;
+                    }
+                    if ((phead == null) != (ahead == null)) {
+                        return ResultOfVoid{ .err = Value{ .string = String{ .data = "arg cannot go into param" } } };
+                    }
+                },
+                else => return ResultOfVoid{ .err = Value{ .string = String{ .data = "arg cannot go into param" } } },
+            },
+            else => return ResultOfVoid{ .err = Value{ .string = String{ .data = "invalid param" } } },
+        }
+
+        return ResultOfVoid.ok;
     }
 
     fn eval_all(self: *Runtime, src: List) ResultOfList {
@@ -130,13 +190,50 @@ const Runtime = struct {
     }
 };
 
-const Context = std.StringHashMap(Value);
+const Context = struct {
+    allocator: std.mem.Allocator,
+    stack: std.ArrayList(std.StringHashMap(Value)),
+
+    pub fn get(self: *Context, key: []const u8) ?Value {
+        var i = self.stack.items.len;
+        while (i > 0) {
+            i -= 1;
+
+            if (self.stack.items[i].get(key)) |value| return value;
+        }
+
+        return null;
+    }
+
+    pub fn put(self: *Context, key: []const u8, value: Value) std.mem.Allocator.Error!void {
+        try self.stack.items[self.stack.items.len - 1].put(key, value);
+    }
+
+    pub fn push(self: *Context) std.mem.Allocator.Error!void {
+        try self.stack.append(std.StringHashMap(Value).init(self.allocator));
+    }
+
+    pub fn pop(self: *Context) void {
+        if (self.stack.popOrNull()) |removed| {
+            var r = removed;
+            r.deinit();
+        }
+    }
+};
 
 const builtins = struct {
     const list = [_]Builtin{
         Builtin{
             .name = "if",
             .func = do_if,
+        },
+        Builtin{
+            .name = "fn",
+            .func = do_fn,
+        },
+        Builtin{
+            .name = "list",
+            .func = do_list,
         },
     };
 
@@ -158,6 +255,35 @@ const builtins = struct {
         return Result{ .err = Value{ .string = String{
             .data = "incorrect number of arguments for if expression",
         } } };
+    }
+
+    fn do_fn(runtime: *Runtime, args: List) Result {
+        if (args) |first| if (first.rest) |second| {
+            const pat = runtime.allocator.create(Value) catch return Result{ .err = Value{ .string = String{ .data = "out of memory" } } };
+            const body = runtime.allocator.create(Value) catch return Result{ .err = Value{ .string = String{ .data = "out of memory" } } };
+            pat.* = first.value;
+            if (second.rest == null) {
+                body.* = second.value;
+            } else {
+                body.* = Value{ .list = second };
+            }
+
+            return Result{ .ok = Value{ .lambda = Lambda{
+                .param = pat,
+                .body = body,
+            } } };
+        };
+
+        return Result{ .err = Value{ .string = String{
+            .data = "incorrect number of arguments for fn expression",
+        } } };
+    }
+
+    fn do_list(runtime: *Runtime, args: List) Result {
+        return switch (runtime.eval_all(args)) {
+            .ok => |l| Result{ .ok = Value{ .list = l } },
+            .err => |err| Result{ .err = err },
+        };
     }
 };
 
@@ -229,6 +355,13 @@ fn output(stdout: std.fs.File.Writer, value: Value) error{
             try stdout.writeByte(')');
         },
         .builtin => |builtin| try stdout.writeAll(builtin.name),
+        .lambda => |lambda| {
+            try stdout.writeByte('(');
+            try output(stdout, lambda.param.*);
+            try stdout.writeByte(' ');
+            try output(stdout, lambda.body.*);
+            try stdout.writeByte(')');
+        },
         .string => |string| if (string.quoted) {
             // TODO: escape stuff
             try stdout.print("\"{s}\"", .{string.data});
@@ -317,6 +450,9 @@ pub const Parser = struct {
                     .close => {},
                     else => return error.UnexpectedToken,
                 } else return error.UnexpectedEof;
+                if (list) |first| if (first.rest == null) {
+                    return first.value;
+                };
                 return Value{ .list = list };
             },
             .open_tag => |open| return try self.parse_tag(open.kind, open.name),
@@ -368,6 +504,11 @@ pub const Result = union(enum) {
     err: Value,
 };
 
+pub const ResultOfVoid = union(enum) {
+    ok,
+    err: Value,
+};
+
 pub const ResultOfList = union(enum) {
     ok: List,
     err: Value,
@@ -378,6 +519,7 @@ pub const Value = union(enum) {
     attr: Attr,
     list: List,
     builtin: Builtin,
+    lambda: Lambda,
     string: String,
 };
 
@@ -411,6 +553,11 @@ pub const ListItem = struct {
 pub const Builtin = struct {
     name: []const u8,
     func: *const fn (*Runtime, List) Result,
+};
+
+pub const Lambda = struct {
+    param: *Value,
+    body: *Value,
 };
 
 pub const String = struct {
