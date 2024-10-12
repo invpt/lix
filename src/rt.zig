@@ -22,7 +22,7 @@ pub const Runtime = struct {
                 },
             } } },
             .attr => |attr| {
-                const new_value = self.allocator.create(ast.Value) catch return ast.Result(ast.Value){ .err = .{ .string = .{ .data = "out of memory" } } };
+                const new_value = self.allocator.create(ast.Value) catch return .{ .err = oom_error };
                 new_value.* = switch (self.eval(attr.value.*)) {
                     .ok => |v| v,
                     .err => |err| return ast.Result(ast.Value){ .err = err },
@@ -60,7 +60,7 @@ pub const Runtime = struct {
 
     fn eval_lambda_call(self: *Runtime, lambda: ast.Lambda, arg: ast.Value) ast.Result(ast.Value) {
         self.context.push() catch return .{ .err = oom_error };
-        switch (self.bind_eval_arg(lambda.param.*, arg)) {
+        switch (self.bind_eval(lambda.param.*, arg)) {
             .ok => {},
             .err => |err| return .{ .err = err },
         }
@@ -69,8 +69,8 @@ pub const Runtime = struct {
         return result;
     }
 
-    fn bind_eval_arg(self: *Runtime, param: ast.Value, arg: ast.Value) ast.Result(void) {
-        switch (param) {
+    fn bind_eval(self: *Runtime, pat: ast.Value, arg: ast.Value) ast.Result(void) {
+        switch (pat) {
             .string => |string| if (!string.quoted) {
                 const evaled = switch (self.eval(arg)) {
                     .ok => |value| value,
@@ -85,7 +85,7 @@ pub const Runtime = struct {
                     while (true) {
                         if (phead) |pcur| {
                             if (ahead) |acur| {
-                                switch (self.bind_eval_arg(pcur.value, acur.value)) {
+                                switch (self.bind_eval(pcur.value, acur.value)) {
                                     .ok => {},
                                     .err => |err| return .{ .err = err },
                                 }
@@ -171,6 +171,10 @@ pub const Context = struct {
 pub const builtins = struct {
     pub const list = [_]ast.Builtin{
         .{
+            .name = "let",
+            .func = do_let,
+        },
+        .{
             .name = "if",
             .func = do_if,
         },
@@ -183,6 +187,19 @@ pub const builtins = struct {
             .func = do_list,
         },
     };
+
+    fn do_let(runtime: *Runtime, args: ast.List) ast.Result(ast.Value) {
+        if (args) |first| {
+            const pat = first.value;
+            const val = if (first.rest) |second| (if (second.rest != null) ast.Value{ .list = second } else second.value) else ast.Value{ .list = null };
+            return switch (runtime.bind_eval(pat, val)) {
+                .ok => .{ .ok = .{ .list = null } },
+                .err => |err| .{ .err = err },
+            };
+        }
+
+        return .{ .err = .{ .string = .{ .data = "not enough args for let" } } };
+    }
 
     fn do_if(runtime: *Runtime, args: ast.List) ast.Result(ast.Value) {
         if (args) |first| if (first.rest) |second| if (second.rest) |third| {
