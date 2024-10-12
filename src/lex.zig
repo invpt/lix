@@ -1,6 +1,26 @@
 const std = @import("std");
 
-pub const Token = union(enum) {
+pub const TokenKind = enum {
+    open,
+    close,
+    open_tag,
+    close_tag,
+    eq,
+    word,
+    literal,
+};
+
+pub const TokenPeek = union(TokenKind) {
+    open,
+    close,
+    open_tag: struct { kind: OpenTagKind },
+    close_tag: CloseTagKind,
+    eq,
+    word,
+    literal,
+};
+
+pub const Token = union(TokenKind) {
     open,
     close,
     open_tag: struct {
@@ -12,6 +32,20 @@ pub const Token = union(enum) {
     eq,
     word: []u8,
     literal: []u8,
+};
+
+pub const LexOptions = struct {
+    parens: bool = false,
+    tags: bool = false,
+    literals: bool = false,
+    eq: bool = false,
+
+    pub const all = LexOptions{
+        .parens = true,
+        .tags = true,
+        .literals = true,
+        .eq = true,
+    };
 };
 
 pub const OpenTagKind = enum {
@@ -30,98 +64,104 @@ pub const CloseTagKind = enum {
 pub const Lexer = struct {
     allocator: std.mem.Allocator,
     src: std.fs.File,
-    peeked_ch: ?u8 = null,
-    peeked_token: ?Token = null,
+    peek1: ?u8 = null,
+    peek2: ?u8 = null,
     inside_tag: bool = false,
 
-    pub fn peek(self: *Lexer) !?Token {
-        if (self.peeked_token) |peeked| {
-            return peeked;
-        } else {
-            self.peeked_token = try self.next();
-            return self.peeked_token;
-        }
+    pub fn require(self: *Lexer, comptime opts: LexOptions) !Token {
+        if (try self.next(opts)) |token| return token else return error.UnexpectedEof;
     }
 
-    pub fn next(self: *Lexer) !?Token {
-        if (self.peeked_token) |peeked| {
-            self.peeked_token = null;
-            return peeked;
+    pub fn peek_kind(self: *Lexer, comptime opts: LexOptions) !?TokenPeek {
+        while (try self.peek_1_ch()) |char| return switch (char) {
+            ' ', '\t', '\r', '\n' => {
+                _ = try self.next_ch();
+                continue;
+            },
+            '(' => if (opts.parens) .open else .word,
+            ')' => if (opts.parens) .close else .word,
+            '<' => if (opts.tags) .{ .open_tag = .{ .kind = if (try self.peek_2_ch()) |char2| switch (char2) {
+                '/' => .closing,
+                '?' => .interro,
+                '!' => .bang,
+                else => .opening,
+            } else return error.UnexpectedEof } } else .word,
+            '"' => if (opts.literals) .literal else .word,
+            '=' => if (opts.eq) .eq else .word,
+            else => |first| {
+                if (self.inside_tag) switch (first) {
+                    '>' => return .{ .close_tag = .normal },
+                    '/' => return .{ .close_tag = .empty },
+                    '?' => return .{ .close_tag = .interro },
+                    else => {},
+                };
+
+                return .word;
+            },
+        };
+
+        return null;
+    }
+
+    pub fn next(self: *Lexer, comptime opts: LexOptions) !?Token {
+        while (try self.next_ch()) |char| {
+            if (is_whitespace(char)) continue;
+
+            if (opts.parens and char == '(') return .open;
+            if (opts.parens and char == ')') return .close;
+            if (opts.tags and char == '<') return try self.open_tag(opts);
+            if (opts.literals and char == '"') return try self.literal();
+            if (opts.eq and char == '=') return .eq;
+
+            if (self.inside_tag) out: {
+                const t = switch (char) {
+                    '>' => Token{ .close_tag = .normal },
+                    '/' => if (try self.peek_1_ch() == '>') b: {
+                        _ = try self.next_ch();
+                        break :b Token{ .close_tag = .empty };
+                    } else {
+                        break :out;
+                    },
+                    '?' => if (try self.peek_1_ch() == '>') b: {
+                        _ = try self.next_ch();
+                        break :b Token{ .close_tag = .interro };
+                    } else {
+                        break :out;
+                    },
+                    else => break :out,
+                };
+
+                self.inside_tag = false;
+
+                return t;
+            }
+
+            return .{ .word = try self.word(char, opts) };
         }
 
-        while (true) {
-            return switch (try self.next_ch() orelse 0) {
-                0 => null,
-                ' ', '\t', '\r', '\n' => continue,
-                '(' => .open,
-                ')' => .close,
-                '<' => try self.open_tag(),
-                '"' => try self.literal(),
-                '=' => .eq,
-                else => |first| {
-                    if (self.inside_tag) out: {
-                        const t = switch (first) {
-                            '>' => Token{ .close_tag = .normal },
-                            '/' => if (try self.peek_ch() == '>') b: {
-                                _ = try self.next_ch();
-                                break :b Token{ .close_tag = .empty };
-                            } else {
-                                break :out;
-                            },
-                            '?' => if (try self.peek_ch() == '>') b: {
-                                _ = try self.next_ch();
-                                break :b Token{ .close_tag = .interro };
-                            } else {
-                                break :out;
-                            },
-                            else => break :out,
-                        };
-
-                        self.inside_tag = false;
-
-                        return t;
-                    }
-
-                    return Token{ .word = try self.word(first) };
-                },
-            };
-        }
+        return null;
     }
 
     fn literal(self: *Lexer) !Token {
         var chars = std.ArrayList(u8).init(self.allocator);
-        while (true) {
-            const nullable = try self.next_ch();
-            if (nullable == null) {
-                break;
-            }
-            const c = nullable.?;
-            switch (c) {
-                '"' => break,
-                '\\' => {
-                    const nullable2 = try self.next_ch();
-                    if (nullable2 == null) {
-                        break;
-                    }
-                    const c2 = nullable2.?;
-                    switch (c2) {
-                        '"' => try chars.append('"'),
-                        'n' => try chars.append('\n'),
-                        'r' => try chars.append('\r'),
-                        't' => try chars.append('\t'),
-                        '\\' => try chars.append('\\'),
-                        '0' => try chars.append(0),
-                        else => return error.UnrecognizedEscape,
-                    }
-                },
-                else => try chars.append(c),
-            }
-        }
+        while (try self.next_ch()) |char| switch (char) {
+            '"' => break,
+            '\\' => if (try self.next_ch()) |char2| switch (char2) {
+                '"' => try chars.append('"'),
+                'n' => try chars.append('\n'),
+                'r' => try chars.append('\r'),
+                't' => try chars.append('\t'),
+                '\\' => try chars.append('\\'),
+                '0' => try chars.append(0),
+                else => return error.UnrecognizedEscape,
+            } else return error.UnexpectedEof,
+            else => try chars.append(char),
+        };
         return Token{ .literal = chars.items };
     }
 
-    fn open_tag(self: *Lexer) !Token {
-        const kind: OpenTagKind = switch (try self.peek_ch() orelse 0) {
+    fn open_tag(self: *Lexer, comptime opts: LexOptions) !Token {
+        const kind: OpenTagKind = if (try self.peek_1_ch()) |char| switch (char) {
             '?' => b: {
                 _ = try self.next_ch();
                 break :b .interro;
@@ -135,37 +175,37 @@ pub const Lexer = struct {
                 break :b .closing;
             },
             else => .opening,
-        };
+        } else return error.UnexpectedEof;
 
-        const name = try self.word(null);
+        const name = try self.word(null, opts);
 
         self.inside_tag = true;
 
         return .{ .open_tag = .{ .kind = kind, .name = name } };
     }
 
-    fn word(self: *Lexer, first: ?u8) ![]u8 {
+    fn word(self: *Lexer, first: ?u8, comptime opts: LexOptions) ![]u8 {
         var chars = std.ArrayList(u8).init(self.allocator);
-        if (first) |f| {
-            try chars.append(f);
-        }
-        while (true) {
-            const c = try self.peek_ch() orelse 0;
-            switch (c) {
-                0, ' ', '\t', '\r', '\n', '(', ')', '<', '>', '=' => break,
-                else => try chars.append(c),
-            }
-            _ = try self.next_ch();
+        if (first) |f| try chars.append(f);
+        while (try self.peek_1_ch()) |char| {
+            if (is_whitespace(char)) break;
+            if (opts.parens and (char == '(' or char == ')')) break;
+            if (opts.tags and (char == '<' or char == '>')) break;
+            if (opts.literals and char == '"') break;
+            if (opts.eq and char == '=') break;
+
+            try chars.append((try self.next_ch()).?);
         }
         return chars.items;
     }
 
     fn next_ch(self: *Lexer) !?u8 {
-        if (self.peeked_ch) |c| {
-            self.peeked_ch = null;
-            return c;
-        }
+        if (self.pop_peek_ch()) |c| return c;
 
+        return try self.next_ch_inner();
+    }
+
+    fn next_ch_inner(self: *Lexer) !?u8 {
         var buffer = [1]u8{0};
         const n = try self.src.readAll(&buffer);
         if (n == 1) {
@@ -175,12 +215,31 @@ pub const Lexer = struct {
         }
     }
 
-    fn peek_ch(self: *Lexer) !?u8 {
-        if (self.peeked_ch) |c| {
-            return c;
+    fn peek_1_ch(self: *Lexer) !?u8 {
+        if (self.peek1 == null) self.peek1 = try self.next_ch_inner();
+        return self.peek1;
+    }
+
+    fn peek_2_ch(self: *Lexer) !?u8 {
+        if (self.peek1 == null) self.peek1 = try self.next_ch_inner();
+        if (self.peek2 == null) self.peek2 = try self.next_ch_inner();
+        return self.peek2;
+    }
+
+    fn pop_peek_ch(self: *Lexer) ?u8 {
+        if (self.peek1) |p| {
+            self.peek1 = self.peek2;
+            self.peek2 = null;
+            return p;
         } else {
-            self.peeked_ch = try self.next_ch();
-            return self.peeked_ch;
+            return null;
         }
     }
 };
+
+fn is_whitespace(char: u8) bool {
+    return switch (char) {
+        ' ', '\t', '\r', '\n' => true,
+        else => false,
+    };
+}

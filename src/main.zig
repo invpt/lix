@@ -49,16 +49,16 @@ pub fn main() !void {
             list = current.rest;
 
             const result = runtime.eval(current.value);
-            switch (result) {
-                .ok => |value| try output(stdout, value),
-                .err => |err| try output(stderr, err),
-            }
+            _ = switch (result) {
+                .ok => |value| try output(stdout, value, .keep_quotes),
+                .err => |err| try output(stderr, err, .keep_quotes),
+            };
             try stdout.writeByte('\n');
         }
     }
 }
 
-fn output(stdout: std.fs.File.Writer, value: ast.Value) error{
+const OutputError = error{
     UnexpectedEof,
     UnexpectedToken,
     MismatchedTagBrackets,
@@ -83,7 +83,11 @@ fn output(stdout: std.fs.File.Writer, value: ast.Value) error{
     InvalidArgument,
     NotOpenForWriting,
     LockViolation,
-}!void {
+};
+
+const QuoteBehavior = enum { keep_quotes, unquote };
+
+fn output(stdout: std.fs.File.Writer, value: ast.Value, quote_behavior: QuoteBehavior) OutputError!u8 {
     switch (value) {
         .node => |node| {
             try stdout.writeAll(switch (node.kind) {
@@ -94,16 +98,16 @@ fn output(stdout: std.fs.File.Writer, value: ast.Value) error{
             try stdout.writeAll(node.name);
             if (node.attrs) |attrs| {
                 try stdout.writeByte(' ');
-                try outputList(stdout, attrs, ' ');
+                try outputList(stdout, attrs, .unquote);
             }
             try stdout.writeAll(switch (node.kind) {
                 .normal, .bang => ">",
-                .empty => "/>",
+                .empty => " />",
                 .interro => "?>",
             });
             if (node.children) |children| {
                 try stdout.writeByte('\n');
-                try outputList(stdout, children, '\n');
+                try outputList(stdout, children, .unquote);
                 try stdout.writeByte('\n');
             }
             switch (node.kind) {
@@ -114,43 +118,54 @@ fn output(stdout: std.fs.File.Writer, value: ast.Value) error{
                 },
                 else => {},
             }
+
+            return '\n';
         },
         .attr => |attr| {
             try stdout.writeAll(attr.name);
             try stdout.writeByte('=');
-            try output(stdout, attr.value.*);
+            _ = try output(stdout, attr.value.*, .keep_quotes);
+
+            return ' ';
         },
         .list => |top| {
             try stdout.writeByte('(');
-            try outputList(stdout, top, ' ');
+            try outputList(stdout, top, .keep_quotes);
             try stdout.writeByte(')');
+
+            return ' ';
         },
-        .builtin => |builtin| try stdout.writeAll(builtin.name),
+        .builtin => |builtin| {
+            try stdout.writeAll(builtin.name);
+            return ' ';
+        },
         .lambda => |lambda| {
             try stdout.writeByte('(');
-            try output(stdout, lambda.param.*);
+            _ = try output(stdout, lambda.param.*, .keep_quotes);
             try stdout.writeByte(' ');
-            try output(stdout, lambda.body.*);
+            _ = try output(stdout, lambda.body.*, .keep_quotes);
             try stdout.writeByte(')');
+            return ' ';
         },
-        .string => |string| if (string.quoted) {
+        .string => |string| if (string.quoted and quote_behavior == .keep_quotes) {
             // TODO: escape stuff
             try stdout.print("\"{s}\"", .{string.data});
+            return ' ';
         } else {
             try stdout.print("{s}", .{string.data});
+            return ' ';
         },
     }
 }
 
-fn outputList(stdout: std.fs.File.Writer, top: ast.List, sep: u8) !void {
+fn outputList(stdout: std.fs.File.Writer, top: ast.List, quote_behavior: QuoteBehavior) !void {
     var list = top;
-    var first = true;
+    var sep: ?u8 = null;
     while (list) |current| {
-        if (!first) {
-            try stdout.writeByte(sep);
+        if (sep) |found| {
+            try stdout.writeByte(found);
         }
-        try output(stdout, current.value);
-        first = false;
+        sep = try output(stdout, current.value, quote_behavior);
         list = current.rest;
     }
 }
