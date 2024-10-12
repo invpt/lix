@@ -107,7 +107,7 @@ fn output(stdout: std.fs.File.Writer, value: ast.Value, quote_behavior: QuoteBeh
             });
             if (node.children) |children| {
                 try stdout.writeByte('\n');
-                try outputList(stdout, children, .unquote);
+                _ = try outputChildren(stdout, children);
                 try stdout.writeByte('\n');
             }
             switch (node.kind) {
@@ -168,4 +168,20 @@ fn outputList(stdout: std.fs.File.Writer, top: ast.List, quote_behavior: QuoteBe
         sep = try output(stdout, current.value, quote_behavior);
         list = current.rest;
     }
+}
+
+fn outputChildren(stdout: std.fs.File.Writer, top: ast.List) !?u8 {
+    var list = top;
+    var sep: ?u8 = null;
+    while (list) |current| {
+        if (sep) |found| {
+            try stdout.writeByte(found);
+        }
+        sep = switch (current.value) {
+            .list => |nested| try outputChildren(stdout, nested),
+            else => try output(stdout, current.value, .unquote),
+        };
+        list = current.rest;
+    }
+    return sep;
 }
