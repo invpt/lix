@@ -175,6 +175,10 @@ pub const builtins = struct {
             .func = do_let,
         },
         .{
+            .name = "do",
+            .func = do_do,
+        },
+        .{
             .name = "if",
             .func = do_if,
         },
@@ -199,6 +203,19 @@ pub const builtins = struct {
         }
 
         return .{ .err = .{ .string = .{ .data = "not enough args for let" } } };
+    }
+
+    fn do_do(runtime: *Runtime, args: ast.List) ast.Result(ast.Value) {
+        var current = args;
+        var value = ast.Value{ .list = null };
+        while (current) |item| {
+            value = switch (runtime.eval(item.value)) {
+                .ok => |v| v,
+                .err => |err| return .{ .err = err },
+            };
+            current = item.rest;
+        }
+        return .{ .ok = value };
     }
 
     fn do_if(runtime: *Runtime, args: ast.List) ast.Result(ast.Value) {

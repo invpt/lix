@@ -8,8 +8,11 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    (let world "World!!")
-    hello (world)
+    (do
+        (let hello "Hello")
+        (let world "world.")
+    )
+    (hello) (world) This is written inline.
     <script src="index.js"></script>
   </body>
 </html>
