@@ -1,5 +1,7 @@
 const std = @import("std");
+const lex = @import("lex.zig");
 const ast = @import("ast.zig");
+const parse = @import("parse.zig");
 
 const oom_error = ast.Value{ .string = ast.String{ .data = "out of memory" } };
 
@@ -7,7 +9,23 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     context: Context,
 
-    pub fn eval(self: *Runtime, value: ast.Value) ast.Result(ast.Value) {
+    pub fn import(self: *Runtime, sub_path: []const u8) ast.Result(ast.Value) {
+        const file = std.fs.cwd().openFile(sub_path, std.fs.File.OpenFlags{
+            .mode = .read_only,
+        }) catch return .{ .err = .{ .string = .{ .data = "failed to open file" } } };
+        const lexer = lex.Lexer{
+            .allocator = self.allocator,
+            .src = file,
+        };
+        var parser = parse.Parser{
+            .allocator = self.allocator,
+            .lexer = lexer,
+        };
+        const list = parser.parse_list() catch return .{ .err = .{ .string = .{ .data = "failed to load/lex/parse file" } } };
+        return self.eval(list2value(list));
+    }
+
+    fn eval(self: *Runtime, value: ast.Value) ast.Result(ast.Value) {
         switch (value) {
             .node => |node| return ast.Result(ast.Value){ .ok = ast.Value{ .node = ast.Node{
                 .name = node.name,
@@ -37,9 +55,22 @@ pub const Runtime = struct {
                 switch (f) {
                     .ok => |v| switch (v) {
                         .builtin => |builtin| return builtin.func(self, head.rest),
-                        .lambda => |lambda| return self.eval_lambda_call(lambda, if (head.rest) |arg| (if (arg.rest != null) ast.Value{ .list = arg } else arg.value) else ast.Value{ .list = null }),
+                        .lambda => |lambda| return self.eval_lambda_call(lambda, list2value(head.rest)),
                         else => {
-                            return .{ .err = .{ .string = .{ .data = "not callable" } } };
+                            // eval the tail
+                            const tail = switch (self.eval_all(head.rest)) {
+                                .ok => |t| t,
+                                .err => |err| return .{ .err = err },
+                            };
+                            // allocate a new list item to hold the head
+                            const evaled = self.allocator.create(ast.ListItem) catch return .{ .err = oom_error };
+                            evaled.* = ast.ListItem{
+                                .value = v,
+                                .spread = false,
+                                .rest = tail,
+                            };
+                            // return this list!
+                            return .{ .ok = .{ .list = evaled } };
                         },
                     },
                     .err => |err| return .{ .err = err },
@@ -171,6 +202,10 @@ pub const Context = struct {
 pub const builtins = struct {
     pub const list = [_]ast.Builtin{
         .{
+            .name = "import",
+            .func = do_import,
+        },
+        .{
             .name = "let",
             .func = do_let,
         },
@@ -192,10 +227,32 @@ pub const builtins = struct {
         },
     };
 
+    fn do_import(runtime: *Runtime, args: ast.List) ast.Result(ast.Value) {
+        if (args) |first| {
+            if (first.rest != null) {
+                return .{ .err = .{ .string = .{ .data = "import cannot take more than one arg" } } };
+            }
+            const name = switch (runtime.eval(first.value)) {
+                .ok => |evaled| switch (evaled) {
+                    .string => |string| string.data,
+                    else => return .{ .err = .{ .string = .{ .data = "import arg must be a string" } } },
+                },
+                .err => |err| return .{ .err = err },
+            };
+
+            return switch (runtime.import(name)) {
+                .ok => |l| .{ .ok = l },
+                .err => |err| .{ .err = err },
+            };
+        }
+
+        return .{ .err = .{ .string = .{ .data = "import must take at least one arg" } } };
+    }
+
     fn do_let(runtime: *Runtime, args: ast.List) ast.Result(ast.Value) {
         if (args) |first| {
             const pat = first.value;
-            const val = if (first.rest) |second| (if (second.rest != null) ast.Value{ .list = second } else second.value) else ast.Value{ .list = null };
+            const val = list2value(first.rest);
             return switch (runtime.bind_eval(pat, val)) {
                 .ok => .{ .ok = .{ .list = null } },
                 .err => |err| .{ .err = err },
@@ -267,3 +324,8 @@ pub const builtins = struct {
         };
     }
 };
+
+fn list2value(list: ast.List) ast.Value {
+    if (list) |item| if (item.rest == null) return item.value;
+    return .{ .list = list };
+}

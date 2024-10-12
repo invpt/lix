@@ -14,17 +14,6 @@ pub fn main() !void {
     const filename = args.next();
 
     if (filename) |f| {
-        const file = try std.fs.cwd().openFile(f, std.fs.File.OpenFlags{
-            .mode = .read_only,
-        });
-        const lexer = lex.Lexer{
-            .allocator = allocator,
-            .src = file,
-        };
-        var parser = parse.Parser{
-            .allocator = allocator,
-            .lexer = lexer,
-        };
         var context = std.StringHashMap(ast.Value).init(std.heap.page_allocator);
         for (rt.builtins.list) |builtin| {
             try context.put(builtin.name, ast.Value{ .builtin = builtin });
@@ -37,24 +26,26 @@ pub fn main() !void {
                 .stack = b: {
                     var l = std.ArrayList(std.StringHashMap(ast.Value)).init(allocator);
                     try l.append(context);
+                    try l.append(std.StringHashMap(ast.Value).init(std.heap.page_allocator));
                     break :b l;
                 },
-                .allocator = allocator,
+                .allocator = std.heap.page_allocator,
             },
         };
-        var list = try parser.parse_list();
         const stdout = std.io.getStdOut().writer();
         const stderr = std.io.getStdErr().writer();
-        while (list) |current| {
-            list = current.rest;
-
-            const result = runtime.eval(current.value);
-            _ = switch (result) {
-                .ok => |value| try output(stdout, value, .keep_quotes),
-                .err => |err| try output(stderr, err, .keep_quotes),
-            };
-            try stdout.writeByte('\n');
+        const value = switch (runtime.import(f)) {
+            .ok => |l| l,
+            .err => |err| {
+                _ = try output(stderr, err, .keep_quotes);
+                return;
+            },
+        };
+        switch (value) {
+            .list => |list| _ = try outputChildren(stdout, list),
+            else => _ = try output(stdout, value, .keep_quotes),
         }
+        try stdout.writeByte('\n');
     }
 }
 
