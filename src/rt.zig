@@ -16,6 +16,7 @@ pub const Runtime = struct {
         const lexer = lex.Lexer{
             .allocator = self.allocator,
             .src = file,
+            .space_buffer = std.ArrayList(u8).init(self.allocator),
         };
         var parser = parse.Parser{
             .allocator = self.allocator,

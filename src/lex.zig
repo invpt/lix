@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const TokenKind = enum {
+    space,
     open,
     close,
     open_tag,
@@ -11,6 +12,7 @@ pub const TokenKind = enum {
 };
 
 pub const TokenPeek = union(TokenKind) {
+    space,
     open,
     close,
     open_tag: struct { kind: OpenTagKind },
@@ -21,6 +23,7 @@ pub const TokenPeek = union(TokenKind) {
 };
 
 pub const Token = union(TokenKind) {
+    space: []u8,
     open,
     close,
     open_tag: struct {
@@ -39,12 +42,21 @@ pub const LexOptions = struct {
     tags: bool = false,
     literals: bool = false,
     eq: bool = false,
+    space: bool = false,
 
     pub const all = LexOptions{
         .parens = true,
         .tags = true,
         .literals = true,
         .eq = true,
+    };
+
+    pub const all_with_space = LexOptions{
+        .parens = true,
+        .tags = true,
+        .literals = true,
+        .eq = true,
+        .space = true,
     };
 };
 
@@ -67,6 +79,7 @@ pub const Lexer = struct {
     peek1: ?u8 = null,
     peek2: ?u8 = null,
     inside_tag: bool = false,
+    space_buffer: std.ArrayList(u8),
 
     pub fn require(self: *Lexer, comptime opts: LexOptions) !Token {
         if (try self.next(opts)) |token| return token else return error.UnexpectedEof;
@@ -74,8 +87,9 @@ pub const Lexer = struct {
 
     pub fn peek_kind(self: *Lexer, comptime opts: LexOptions) !?TokenPeek {
         while (try self.peek_1_ch()) |char| return switch (char) {
-            ' ', '\t', '\r', '\n' => {
+            ' ', '\t', '\r', '\n' => if (opts.space) .space else {
                 _ = try self.next_ch();
+                try self.space_buffer.append(char);
                 continue;
             },
             '(' => if (opts.parens) .open else .word,
@@ -104,9 +118,24 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer, comptime opts: LexOptions) !?Token {
-        while (try self.next_ch()) |char| {
-            if (is_whitespace(char)) continue;
+        if (opts.space) {
+            while (try self.peek_1_ch()) |char| if (is_whitespace(char)) {
+                _ = try self.next_ch();
+                try self.space_buffer.append(char);
+            } else break;
+            if (self.space_buffer.items.len != 0) {
+                const space = self.space_buffer.items;
+                self.space_buffer = std.ArrayList(u8).init(self.allocator);
+                return .{ .space = space };
+            }
+        } else {
+            try self.space_buffer.resize(0);
+            while (try self.peek_1_ch()) |char| if (is_whitespace(char)) {
+                _ = try self.next_ch();
+            } else break;
+        }
 
+        if (try self.next_ch()) |char| {
             if (opts.parens and char == '(') return .open;
             if (opts.parens and char == ')') return .close;
             if (opts.tags and char == '<') return try self.open_tag(opts);

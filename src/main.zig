@@ -5,31 +5,29 @@ const parse = @import("parse.zig");
 const rt = @import("rt.zig");
 
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
     var args = try std.process.argsWithAllocator(allocator);
     _ = args.skip(); // skip over own path
     const filename = args.next();
 
     if (filename) |f| {
-        var context = std.StringHashMap(ast.Value).init(std.heap.page_allocator);
+        var context = std.StringHashMap(ast.Value).init(allocator);
         for (rt.builtins.list) |builtin| {
             try context.put(builtin.name, ast.Value{ .builtin = builtin });
         }
         try context.put("true", .{ .string = .{ .data = "true", .quoted = false } });
         try context.put("false", .{ .list = null });
         var runtime = rt.Runtime{
-            .allocator = std.heap.page_allocator,
+            .allocator = allocator,
             .context = rt.Context{
                 .stack = b: {
                     var l = std.ArrayList(std.StringHashMap(ast.Value)).init(allocator);
                     try l.append(context);
-                    try l.append(std.StringHashMap(ast.Value).init(std.heap.page_allocator));
+                    try l.append(std.StringHashMap(ast.Value).init(allocator));
                     break :b l;
                 },
-                .allocator = std.heap.page_allocator,
+                .allocator = allocator,
             },
         };
         const stdout = std.io.getStdOut().writer();
@@ -97,9 +95,7 @@ fn output(stdout: std.fs.File.Writer, value: ast.Value, quote_behavior: QuoteBeh
                 .interro => "?>",
             });
             if (node.children) |children| {
-                try stdout.writeByte('\n');
                 _ = try outputChildren(stdout, children);
-                try stdout.writeByte('\n');
             }
             switch (node.kind) {
                 .normal => {
@@ -165,9 +161,6 @@ fn outputChildren(stdout: std.fs.File.Writer, top: ast.List) !?u8 {
     var list = top;
     var sep: ?u8 = null;
     while (list) |current| {
-        if (sep) |found| {
-            try stdout.writeByte(found);
-        }
         sep = switch (current.value) {
             .list => |nested| try outputChildren(stdout, nested),
             else => try output(stdout, current.value, .unquote),

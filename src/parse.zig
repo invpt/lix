@@ -118,14 +118,15 @@ pub const Parser = struct {
         };
         const children = if (kind == ast.NodeKind.normal) try self.parse_list_inner(struct {
             fn parse_item(p: *Parser) !ast.Value {
-                switch (try p.lexer.require(.{ .parens = true, .tags = true })) {
+                switch (try p.lexer.require(.{ .parens = true, .tags = true, .space = true })) {
                     .open => return try p.parse_open(),
                     .open_tag => |open| return try p.parse_open_tag(open.kind, open.name),
                     .word => |word| return try p.parse_word(word, .{ .quoted = true, .parse_attrs = true }),
+                    .space => |space| return .{ .string = .{ .data = space } },
                     else => return error.UnexpectedToken,
                 }
             }
-        }, .{ .parens = true, .tags = true }) else null;
+        }, .{ .parens = true, .tags = true, .space = true }) else null;
         return .{ .node = .{
             .name = name,
             .kind = kind,
