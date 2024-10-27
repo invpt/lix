@@ -92,8 +92,8 @@ pub const Lexer = struct {
                 try self.space_buffer.append(char);
                 continue;
             },
-            '(' => if (opts.parens) .open else .word,
-            ')' => if (opts.parens) .close else .word,
+            '[' => if (opts.parens) .open else .word,
+            ']' => if (opts.parens) .close else .word,
             '<' => if (opts.tags) .{ .open_tag = .{ .kind = if (try self.peek_2_ch()) |char2| switch (char2) {
                 '/' => .closing,
                 '?' => .interro,
@@ -136,8 +136,8 @@ pub const Lexer = struct {
         }
 
         if (try self.next_ch()) |char| {
-            if (opts.parens and char == '(') return .open;
-            if (opts.parens and char == ')') return .close;
+            if (opts.parens and char == '[') return .open;
+            if (opts.parens and char == ']') return .close;
             if (opts.tags and char == '<') return try self.open_tag(opts);
             if (opts.literals and char == '"') return try self.literal();
             if (opts.eq and char == '=') return .eq;
@@ -218,7 +218,7 @@ pub const Lexer = struct {
         if (first) |f| try chars.append(f);
         while (try self.peek_1_ch()) |char| {
             if (is_whitespace(char)) break;
-            if (opts.parens and (char == '(' or char == ')')) break;
+            if (opts.parens and (char == '[' or char == ']')) break;
             if (opts.tags and (char == '<' or char == '>')) break;
             if (opts.literals and char == '"') break;
             if (opts.eq and char == '=') break;
